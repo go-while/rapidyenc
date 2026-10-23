@@ -3,6 +3,7 @@ module github.com/mnightingale/rapidyenc
 go 1.27
 
 require (
+	github.com/go-while/go-yenc-simd v0.1.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.42.0
 )

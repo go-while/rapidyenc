@@ -1,0 +1,79 @@
+name: NEON check
+
+# Checks the pure-Go NEON decode kernel (decoder_simd_arm64.go, built with
+# CGO_ENABLED=0 GOEXPERIMENT=simd) against decodeGeneric and against
+# go-yenc-simd's byte-by-byte state machine, and checks that it stays within
+# the bounds of src and dst. The zz_*_test.go files hold the tests.
+
+on:
+  push:
+    branches: [ci-neon-check]
+
+jobs:
+  neon:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CGO_ENABLED: '0'
+      GOEXPERIMENT: simd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: a. Environment and kernel (must be NEON)
+        id: env
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED GOEXPERIMENT
+          uname -a
+          uname -m
+          if [ "$(uname -s)" = Linux ]; then
+            lscpu || true
+            grep -m1 -iE 'model name|CPU part' /proc/cpuinfo || true
+            getconf PAGESIZE
+          else
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl hw.pagesize hw.ncpu || true
+          fi
+          ZZ_WANT_KERNEL=NEON go test -count=1 -run '^TestZZKernel$' -v .
+
+      - name: b. Their own test suite (without the zz tests)
+        if: always() && steps.env.outcome == 'success'
+        run: |
+          echo "their tests, benchmarks, fuzz targets and examples: $(go test -list . . | grep -vc '^TestZZ\|^ok')"
+          go test -count=1 -skip '^TestZZ' ./...
+
+      - name: c. TestZZBoundaries, NEON vs decodeGeneric (inputs over 128 bytes, 6 alignments)
+        if: always() && steps.env.outcome == 'success'
+        run: go test -count=1 -run '^TestZZBoundaries$' -v .
+
+      - name: d1. TestZZAnalyze, three-way on all boundary inputs
+        if: always() && steps.env.outcome == 'success'
+        run: go test -count=1 -run '^TestZZAnalyze$' -v .
+
+      - name: d2. TestZZRandom, three-way on random inputs up to 2 KiB
+        if: always() && steps.env.outcome == 'success'
+        env:
+          ZZ_RANDOM_N: '500000'
+        run: go test -count=1 -timeout 30m -run '^TestZZRandom$' -v .
+
+      - name: e1. Guard pages, src and dst ending at PROT_NONE pages
+        if: always() && steps.env.outcome == 'success'
+        env:
+          ZZ_GUARD_N: '500000'
+        run: go test -count=1 -timeout 30m -run '^(TestZZGuardSelfTest|TestZZGuard)$' -v .
+
+      - name: e2. checkptr, boundary and random inputs
+        if: always() && steps.env.outcome == 'success'
+        run: go test -count=1 -timeout 30m -gcflags=all=-d=checkptr -run '^(TestZZBoundaries|TestZZRandom)$' -v .
+
+      - name: f. TestZZSplit, Decoder.Next split reads (known bug, informational)
+        if: always() && steps.env.outcome == 'success'
+        continue-on-error: true
+        run: go test -count=1 -run '^TestZZSplit$' -v .
